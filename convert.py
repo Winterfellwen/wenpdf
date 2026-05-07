@@ -4,6 +4,11 @@ import base64
 import fitz  # PyMuPDF
 import io
 from PIL import Image
+import re
+from bs4 import BeautifulSoup
+from docx import Document
+from docx.shared import Pt, RGBColor, Inches
+from docx.enum.text import WD_UNDERLINE
 
 # Playwright is optional - only needed for HTML screenshots
 try:
@@ -11,6 +16,13 @@ try:
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
+
+# python-docx is optional - only needed for DOCX output
+try:
+    from docx import Document
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
 
 def parse_fontname(fontname):
     """Extract actual font name from pdfplumber's fontname and map to standard fonts"""
@@ -379,6 +391,206 @@ def html_to_images(html_path, pdf_path, out_dir):
 
         browser.close()
 
+
+def html_to_docx(html_path, docx_path):
+    """Convert HTML to DOCX format"""
+    if not DOCX_AVAILABLE:
+        print('Error: python-docx is not installed.')
+        print('To create DOCX files, install python-docx:')
+        print('  pip install python-docx')
+        return False
+
+    try:
+        with open(html_path, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+    except Exception as e:
+        print(f'Error reading HTML file: {e}')
+        return False
+
+    soup = BeautifulSoup(html_content, 'lxml')
+
+    # Get page dimensions from style
+    page_width = 595  # default A4 width in points
+    page_height = 842  # default A4 height in points
+    style = soup.find('style')
+    if style:
+        css = style.string or ''
+        width_match = re.search(r'width:\s*(\d+)pt', css)
+        height_match = re.search(r'height:\s*(\d+)pt', css)
+        if width_match:
+            page_width = int(width_match.group(1))
+        if height_match:
+            page_height = int(height_match.group(1))
+
+    # Create DOCX document
+    doc = Document()
+    section = doc.sections[0]
+    section.page_width = Inches(page_width / 72)
+    section.page_height = Inches(page_height / 72)
+
+    # Get all elements
+    body = soup.find('body')
+    if not body:
+        print('Error: No body found in HTML')
+        return False
+
+    # Process each element in order (by top position)
+    elements = []
+    for elem in body.find_all(['div', 'p', 'img', 'table', 'hr']):
+        style = elem.get('style', '')
+        top_match = re.search(r'top:\s*([\d.]+)pt', style)
+        left_match = re.search(r'left:\s*([\d.]+)pt', style)
+        width_match = re.search(r'width:\s*([\d.]+)pt', style)
+        height_match = re.search(r'height:\s*([\d.]+)pt', style)
+
+        elem_data = {
+            'element': elem,
+            'top': float(top_match.group(1)) if top_match else 0,
+            'left': float(left_match.group(1)) if left_match else 0,
+            'width': float(width_match.group(1)) if width_match else page_width,
+            'height': float(height_match.group(1)) if height_match else 0,
+            'type': elem.name
+        }
+        elements.append(elem_data)
+
+    # Sort by top position
+    elements.sort(key=lambda x: x['top'])
+
+    # Process each element
+    for elem_data in elements:
+        elem = elem_data['element']
+        elem_type = elem_data['type']
+
+        if elem_type == 'img':
+            # Handle images
+            src = elem.get('src', '')
+            if src.startswith('data:image'):
+                # Extract base64 image
+                match = re.search(r'data:image/(\w+);base64,(.+)', src)
+                if match:
+                    img_data = base64.b64decode(match.group(2))
+                    try:
+                        img = Image.open(io.BytesIO(img_data))
+                        # Save to temporary file for docx
+                        temp_img_path = os.path.join(os.path.dirname(docx_path), 'temp_img.png')
+                        img.save(temp_img_path)
+
+                        # Calculate image size in inches
+                        width_inch = elem_data['width'] / 72
+                        height_inch = elem_data['height'] / 72
+
+                        # Add to docx (max width 6 inches)
+                        max_width = 6
+                        if width_inch > max_width:
+                            ratio = max_width / width_inch
+                            width_inch = max_width
+                            height_inch = height_inch * ratio
+
+                        doc.add_picture(temp_img_path, width=Inches(width_inch), height=Inches(height_inch))
+
+                        # Clean up temp file
+                        try:
+                            os.remove(temp_img_path)
+                        except:
+                            pass
+                    except Exception as e:
+                        print(f'Warning: Could not add image: {e}')
+
+        elif elem_type == 'table':
+            # Handle tables
+            rows = elem.find_all('tr')
+            if rows:
+                table = doc.add_table(rows=len(rows), cols=len(rows[0].find_all(['td', 'th'])) if rows else 0)
+                table.style = 'Table Grid'
+
+                for r_idx, row in enumerate(rows):
+                    cells = row.find_all(['td', 'th'])
+                    for c_idx, cell in enumerate(cells):
+                        if r_idx < len(table.rows) and c_idx < len(table.columns):
+                            cell_text = cell.get_text(strip=True)
+                            table.cell(r_idx, c_idx).text = cell_text
+
+        elif elem_type == 'hr':
+            # Horizontal line
+            doc.add_paragraph('_' * 50)
+
+        elif elem_type in ('div', 'p'):
+            # Handle text content
+            text = elem.get_text(strip=True)
+            if text:
+                # Check if it's a rectangle (border box with minimal text)
+                style = elem.get('style', '')
+                if 'border' in style or 'border-width' in style:
+                    # This might be a rectangle, add as bordered paragraph
+                    p = doc.add_paragraph(text)
+                else:
+                    # Regular paragraph
+                    p = doc.add_paragraph()
+
+                    # Parse inline styles
+                    for span in elem.find_all('span'):
+                        span_text = span.get_text()
+                        if not span_text:
+                            continue
+
+                        # Get style
+                        span_style = span.get('style', '')
+
+                        # Font size
+                        font_size = 12
+                        size_match = re.search(r'font-size:\s*([\d.]+)pt', span_style)
+                        if size_match:
+                            font_size = float(size_match.group(1))
+
+                        # Font color
+                        color = None
+                        color_match = re.search(r'color:\s*rgb\((\d+),\s*(\d+),\s*(\d+)\)', span_style)
+                        if color_match:
+                            color = RGBColor(
+                                int(color_match.group(1)),
+                                int(color_match.group(2)),
+                                int(color_match.group(3))
+                            )
+
+                        # Font name
+                        font_name = 'Calibri'
+                        font_match = re.search(r'font-family:\s*([^;]+)', span_style)
+                        if font_match:
+                            font_name = parse_fontname(font_match.group(1).strip())
+
+                        # Bold, Italic, Underline
+                        is_bold = 'font-weight: bold' in span_style or 'font-weight: 700' in span_style
+                        is_italic = 'font-style: italic' in span_style
+                        is_underline = 'text-decoration: underline' in span_style
+
+                        # Add run
+                        run = p.add_run(span_text)
+                        run.font.name = font_name
+                        run.font.size = Pt(font_size)
+                        if color:
+                            run.font.color.rgb = color
+                        if is_bold:
+                            run.font.bold = True
+                        if is_italic:
+                            run.font.italic = True
+                        if is_underline:
+                            run.font.underline = WD_UNDERLINE.SINGLE
+
+                    # If no spans found, add plain text
+                    if not p.runs:
+                        run = p.add_run(text)
+                        run.font.name = 'Calibri'
+                        run.font.size = Pt(12)
+
+    try:
+        doc.save(docx_path)
+        print(f'Saved DOCX: {docx_path}')
+        return True
+    except Exception as e:
+        print(f'Error saving DOCX: {e}')
+        return False
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='Convert PDF to HTML/DOCX/DOC')
@@ -406,11 +618,23 @@ def main():
 
     print(f'Converting PDF to {output_format.upper()}: {pdf_path}')
 
-    if output_format in ('docx', 'doc'):
-        print(f'Error: {output_format.upper()} format not yet implemented')
-        return
+    # Generate HTML first (intermediate format)
+    html_path = output_path.replace('.docx', '.doc').replace('.doc', '') + '.html'
+    pdf_to_html(pdf_path, html_path)
 
-    pdf_to_html(pdf_path, output_path)
+    # If output format is docx, convert HTML to DOCX
+    if output_format == 'docx':
+        success = html_to_docx(html_path, output_path)
+        if not success:
+            print('Failed to create DOCX, HTML file is available instead.')
+            return
+
+        # Clean up intermediate HTML file
+        if html_path != output_path:
+            try:
+                os.remove(html_path)
+            except:
+                pass
 
     screenshot_opts = args.screenshot
     if 'pdf' in screenshot_opts or 'all' in screenshot_opts:
