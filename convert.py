@@ -1,10 +1,16 @@
 ﻿import pdfplumber
-from playwright.sync_api import sync_playwright
 import os
 import base64
 import fitz  # PyMuPDF
 import io
 from PIL import Image
+
+# Playwright is optional - only needed for HTML screenshots
+try:
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
 
 def parse_fontname(fontname):
     """Extract actual font name from pdfplumber's fontname and map to standard fonts"""
@@ -339,31 +345,38 @@ def pdf_to_images(pdf_path, out_dir, resolution=150):
             print(f'Saved PDF image: {path}')
 
 def html_to_images(html_path, pdf_path, out_dir):
+    if not PLAYWRIGHT_AVAILABLE:
+        print('Error: Playwright is not installed.')
+        print('To use HTML screenshot feature, install Playwright:')
+        print('  pip install playwright')
+        print('  playwright install chromium')
+        return
+
     os.makedirs(out_dir, exist_ok=True)
     with pdfplumber.open(pdf_path) as pdf:
         num_pages = len(pdf.pages)
-    
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         page.goto(f'file://{os.path.abspath(html_path)}')
         page.wait_for_load_state('networkidle')
-        
+
         # Get page dimensions from PDF
         with pdfplumber.open(pdf_path) as pdf:
             for i in range(min(num_pages, 3)):
                 pdf_page = pdf.pages[i]
                 width_px = int(pdf_page.width * 150 / 72)
                 height_px = int(pdf_page.height * 150 / 72)
-                
+
                 page.set_viewport_size({'width': width_px, 'height': height_px})
                 page.goto(f'file://{os.path.abspath(html_path)}')
                 page.wait_for_timeout(500)
-                
+
                 path = os.path.join(out_dir, f'html_page_{i+1}.png')
                 page.screenshot(path=path, full_page=False)
                 print(f'Saved HTML image: {path}')
-        
+
         browser.close()
 
 def main():

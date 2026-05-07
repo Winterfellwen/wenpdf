@@ -13,23 +13,23 @@
 
 ## 安装
 
-```bash
-pip install git+https://github.com/Winterfellwen/wenpdf.git
-```
-
-或本地安装：
+### 1. 克隆项目
 
 ```bash
 git clone https://github.com/Winterfellwen/wenpdf.git
 cd wenpdf
-pip install -e .
 ```
 
-### 依赖安装
-
-首次使用需要安装 Playwright 浏览器：
+### 2. 安装依赖
 
 ```bash
+pip install -r requirements.txt
+```
+
+### 3. 安装 Playwright 浏览器（可选，仅截图功能需要）
+
+```bash
+pip install playwright
 playwright install chromium
 ```
 
@@ -37,10 +37,10 @@ playwright install chromium
 
 ```bash
 # PDF 转 HTML
-wenpdf input.pdf -o output.html
+python convert.py input.pdf -o output.html
 
 # PDF 转 HTML 并生成对比截图
-wenpdf input.pdf -o output.html --screenshot all
+python convert.py input.pdf -o output.html --screenshot all
 ```
 
 ## 命令参数
@@ -56,39 +56,22 @@ wenpdf input.pdf -o output.html --screenshot all
 
 ```bash
 # 基本转换
-wenpdf document.pdf
+python convert.py document.pdf
 
 # 指定输出文件名
-wenpdf document.pdf -o result.html
+python convert.py document.pdf -o result.html
 
 # 指定输出格式（目前支持 html）
-wenpdf document.pdf -o result.html -f html
+python convert.py document.pdf -o result.html -f html
 
 # 只生成 PDF 截图
-wenpdf document.pdf --screenshot pdf
+python convert.py document.pdf --screenshot pdf
 
 # 只生成 HTML 截图
-wenpdf document.pdf --screenshot html
+python convert.py document.pdf --screenshot html
 
 # 生成 PDF 和 HTML 对比截图
-wenpdf document.pdf --screenshot all
-```
-
-## 开发
-
-```bash
-# 克隆项目
-git clone https://github.com/Winterfellwen/wenpdf.git
-cd wenpdf
-
-# 安装开发依赖
-pip install -e .
-
-# 运行
-wenpdf test.pdf
-
-# 运行测试
-python -m convert test.pdf -o output.html
+python convert.py document.pdf --screenshot all
 ```
 
 ## 许可证
