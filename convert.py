@@ -643,7 +643,7 @@ def main():
 
     if 'html' in screenshot_opts or 'all' in screenshot_opts:
         print('Converting HTML to images...')
-        html_to_images(output_path, pdf_path, 'html_images')
+        html_to_images(html_path, pdf_path, 'html_images')
 
     print(f'Done! Output: {output_path}')
     if 'pdf' in screenshot_opts or 'all' in screenshot_opts:
