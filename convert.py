@@ -1,147 +1,28 @@
-﻿import pdfplumber
+"""
+优化脚本：将670KB版本转换为更精简的版本，同时保持位置精确
+"""
+import pdfplumber
 import os
 import base64
-import fitz  # PyMuPDF
+import fitz
 import io
 from PIL import Image
-import re
 from bs4 import BeautifulSoup
-from docx import Document
-from docx.shared import Pt, RGBColor, Inches
-from docx.enum.text import WD_UNDERLINE
-
-# Playwright is optional - only needed for HTML screenshots
-try:
-    from playwright.sync_api import sync_playwright
-    PLAYWRIGHT_AVAILABLE = True
-except ImportError:
-    PLAYWRIGHT_AVAILABLE = False
-
-# python-docx is optional - only needed for DOCX output
-try:
-    from docx import Document
-    DOCX_AVAILABLE = True
-except ImportError:
-    DOCX_AVAILABLE = False
 
 def parse_fontname(fontname):
-    """Extract actual font name from pdfplumber's fontname and map to standard fonts"""
     if '+' in fontname:
         name = fontname.split('+')[1]
     else:
         name = fontname
-    
     font_map = {
         'ArialMT': 'Arial, sans-serif',
         'Arial-BoldMT': 'Arial, sans-serif',
         'TimesNewRomanPSMT': 'Times New Roman, serif',
-        'TimesNewRomanPS-BoldMT': 'Times New Roman, serif',
-        'CourierNewPSMT': 'Courier New, monospace',
     }
     return font_map.get(name, f'{name}, sans-serif')
 
-def render_line(chars, html_parts):
-    """Render a line of characters, aggressively grouping same-style chars"""
-    if not chars:
-        return
-    
-    chars.sort(key=lambda x: x.get('x0', 0))
-    
-    current_text = ''
-    current_x0 = None
-    current_top = None
-    current_size = None
-    current_font = None
-    current_color = None
-    
-    for c in chars:
-        text = c.get('text', '')
-        x0 = c.get('x0', 0)
-        top = c.get('top', 0)
-        width = c.get('width', 0)
-        size = c.get('size', 12)
-        font = parse_fontname(c.get('fontname', 'Arial'))
-        color = c.get('color', (0,0,0))
-        if isinstance(color, (tuple, list)):
-            hex_color = '#{:02x}{:02x}{:02x}'.format(*[int(col*255) for col in color])
-        else:
-            hex_color = '#000000'
-        
-        is_space = text.strip() == '' and width > 3
-        
-        if current_x0 is None:
-            current_text = text
-            current_x0 = x0
-            current_top = top
-            current_size = size
-            current_font = font
-            current_color = hex_color
-            continue
-        
-        same_style = (size == current_size and font == current_font and color == current_color)
-        
-        if is_space:
-            style = f"left:{current_x0}pt;top:{current_top}pt;font-family:{current_font};font-size:{current_size}pt;color:{current_color};"
-            html_parts.append(f'<span style="{style}">{current_text}</span>')
-            
-            space_style = f"left:{x0}pt;top:{top}pt;width:{width}pt;font-size:{size}pt;"
-            html_parts.append(f'<span style="{space_style}"> </span>')
-            
-            current_text = ''
-            current_x0 = None
-        elif same_style:
-            current_text += text
-        else:
-            style = f"left:{current_x0}pt;top:{current_top}pt;font-family:{current_font};font-size:{current_size}pt;color:{current_color};"
-            html_parts.append(f'<span style="{style}">{current_text}</span>')
-            
-            current_text = text
-            current_x0 = x0
-            current_top = top
-            current_size = size
-            current_font = font
-            current_color = hex_color
-    
-    if current_text:
-        style = f"left:{current_x0}pt;top:{current_top}pt;font-family:{current_font};font-size:{current_size}pt;color:{current_color};"
-        html_parts.append(f'<span style="{style}">{current_text}</span>')
-
-def extract_images_pymupdf(pdf_path):
-    """Extract images from PDF using PyMuPDF, returns dict mapping (page_num, xref) to image data"""
-    images = {}
-    doc = fitz.open(pdf_path)
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        image_list = page.get_images(full=True)
-        for img_index, img in enumerate(image_list):
-            xref = img[0]
-            base_image = doc.extract_image(xref)
-            if base_image:
-                images[(page_num, xref)] = {
-                    'data': base_image['image'],
-                    'ext': base_image['ext'],
-                    'width': base_image['width'],
-                    'height': base_image['height']
-                }
-    doc.close()
-    return images
-
-def render_page_as_image(pdf_path, page_num, dpi=150):
-    """Render entire PDF page as image"""
-    doc = fitz.open(pdf_path)
-    page = doc[page_num]
-    zoom = dpi / 72
-    mat = fitz.Matrix(zoom, zoom)
-    
-    # Render to RGB (no alpha) - white background
-    pix = page.get_pixmap(matrix=mat, alpha=False)
-    
-    # Convert to PNG
-    img_data = pix.tobytes("png")
-    doc.close()
-    return base64.b64encode(img_data).decode('utf-8'), pix.width, pix.height
-
-def pdf_to_html(pdf_path, html_path):
+def pdf_to_html_optimized(pdf_path, html_path):
+    """优化版HTML转换 - 保持位置精确同时减少span数量"""
     html_parts = [
         '<!DOCTYPE html>',
         '<html><head>',
@@ -150,12 +31,10 @@ def pdf_to_html(pdf_path, html_path):
         '* { margin: 0; padding: 0; box-sizing: border-box; }',
         'body { background: #f0f0f0; padding: 20px; font-family: sans-serif; }',
         '.pdf-page { position: relative; margin: 0 auto 20px; background: white; box-shadow: 0 0 10px rgba(0,0,0,0.3); }',
-        'span { position: absolute; white-space: pre; line-height: 1; margin: 0; padding: 0; font-style: normal; font-weight: normal; }',
+        'span { position: absolute; white-space: pre; line-height: 1; margin: 0; padding: 0; text-align: justify; }',
         'div.rect { position: absolute; }',
         'div.line { position: absolute; z-index: 10; }',
         'img { position: absolute; max-width: none; }',
-        'table { border-collapse: collapse; }',
-        'td { border: 1px solid #000; padding: 0; }',
         '</style></head><body>'
     ]
     
@@ -165,70 +44,32 @@ def pdf_to_html(pdf_path, html_path):
             page_height = page.height
             html_parts.append(f'<div class="pdf-page" style="width:{page_width}pt;height:{page_height}pt;">')
             
-            # Check if page has extractable text
             has_text = page.chars and len(page.chars) > 0
             
-            # For scanned PDFs (no text), render page as image FIRST (background layer)
-            # Skip embedded image extraction since page is already rendered as complete image
             if not has_text:
                 img_b64, img_w, img_h = render_page_as_image(pdf_path, page_num, dpi=150)
                 html_parts.append(f'<img src="data:image/png;base64,{img_b64}" style="left:0;top:0;width:{page_width}pt;height:{page_height}pt;" />')
             else:
-                # For PDFs with text, extract embedded images using PyMuPDF
+                # 提取图片
                 try:
                     doc = fitz.open(pdf_path)
                     image_list = doc.get_page_images(page_num, full=True)
                     for img_idx, img_info in enumerate(image_list):
                         try:
                             xref = img_info[0]
-                            img_width = img_info[2]
-                            img_height = img_info[3]
-
                             base_image = doc.extract_image(xref)
                             if not base_image:
                                 continue
-
                             img_data = base_image['image']
                             img_ext = base_image['ext'].lower()
-
-                            try:
-                                img = Image.open(io.BytesIO(img_data))
-
-                                # Check if image has transparency
-                                has_transparency = img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info)
-
-                                # If PNG format - keep as PNG (supports transparency in browser)
-                                if img_ext == 'png':
-                                    buf = io.BytesIO()
-                                    img.save(buf, format='PNG')
-                                    img_data = buf.getvalue()
-                                # If has transparency (RGBA/LA/P) but not PNG - paste on white and convert to JPEG
-                                elif has_transparency:
-                                    background = Image.new('RGB', img.size, (255, 255, 255))
-                                    if img.mode == 'RGBA':
-                                        background.paste(img, mask=img.split()[3])
-                                    elif img.mode == 'LA':
-                                        background.paste(img, mask=img.split()[1])
-                                    elif img.mode == 'P':
-                                        img = img.convert('RGBA')
-                                        background.paste(img, mask=img.split()[3])
-                                    img = background
-                                    img_ext = 'jpeg'
-                                    buf = io.BytesIO()
-                                    img.save(buf, format='JPEG', quality=95)
-                                    img_data = buf.getvalue()
-                                else:
-                                    # No transparency, convert to JPEG
-                                    img_ext = 'jpeg'
-                                    buf = io.BytesIO()
-                                    img.save(buf, format='JPEG', quality=95)
-                                    img_data = buf.getvalue()
-                            except Exception as e:
-                                pass
-
-                            mime = f'image/{img_ext}'
-                            img_b64 = base64.b64encode(img_data).decode('utf-8')
-
+                            img = Image.open(io.BytesIO(img_data))
+                            buf = io.BytesIO()
+                            if img_ext == 'png':
+                                img.save(buf, format='PNG')
+                            else:
+                                img.convert('RGB').save(buf, format='JPEG', quality=95)
+                                img_ext = 'jpeg'
+                            img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
                             if img_idx < len(page.images):
                                 img_dict = page.images[img_idx]
                                 x0 = img_dict.get('x0', 0)
@@ -237,144 +78,48 @@ def pdf_to_html(pdf_path, html_path):
                                 h = img_dict.get('height', base_image['height'])
                             else:
                                 x0, y0, w, h = 0, 0, base_image['width'], base_image['height']
-                            
-                            html_parts.append(f'<img src="data:{mime};base64,{img_b64}" style="left:{x0}pt;top:{y0}pt;width:{w}pt;height:{h}pt;" />')
-                        except Exception as e:
-                            print(f'PyMuPDF image error p{page_num+1}-{img_idx}: {e}')
+                            html_parts.append(f'<img src="data:image/{img_ext};base64,{img_b64}" style="left:{x0}pt;top:{y0}pt;width:{w}pt;height:{h}pt;" />')
+                        except: pass
                     doc.close()
-                except Exception as e:
-                    print(f'PyMuPDF error p{page_num+1}: {e}')
+                except: pass
             
-            # For scanned PDFs (no text), skip extracting rects/lines as they are false positives from the image
-            if not has_text:
-                # Skip rect and line extraction for scanned PDFs - page is already rendered as image
-                pass
-            else:
-                # Extract rectangles (only for PDFs with text)
+            # 提取矩形
+            if has_text:
                 for rect in page.rects:
                     try:
-                        x0 = rect['x0']
-                        y0 = rect['top']
-                        w = rect['width']
-                        h = rect['height']
-                        
+                        x0, y0, w, h = rect['x0'], rect['top'], rect['width'], rect['height']
                         sc = rect.get('stroke_color')
                         fc = rect.get('fill_color')
-                        lw = rect.get('line_width', 1)
-                        
                         stroke = '#000000'
                         if sc and isinstance(sc, (tuple, list)):
                             stroke = '#{:02x}{:02x}{:02x}'.format(*[int(c*255) for c in sc])
-                        
                         fill = 'transparent'
                         if fc and isinstance(fc, (tuple, list)):
                             fill = '#{:02x}{:02x}{:02x}'.format(*[int(c*255) for c in fc])
-                        
-                        html_parts.append(f'<div class="rect" style="left:{x0}pt;top:{y0}pt;width:{w}pt;height:{h}pt;border:{lw}pt solid {stroke};background:{fill};"></div>')
-                    except Exception as e:
-                        print(f'Rect error p{page_num+1}: {e}')
+                        html_parts.append(f'<div class="rect" style="left:{x0}pt;top:{y0}pt;width:{w}pt;height:{h}pt;border:1pt solid {stroke};background:{fill};"></div>')
+                    except: pass
                 
-                # Extract lines (horizontal/vertical dividers) - only for PDFs with text
+                # 提取线条
                 for line in page.lines:
                     try:
-                        x0 = line['x0']
-                        x1 = line['x1']
-                        y0 = line['top']
-                        y1 = line['bottom']
-                        raw_lw = line.get('linewidth', 1)
-                        
+                        x0, x1, y0, y1 = line['x0'], line['x1'], line['top'], line['bottom']
                         sc = line.get('stroking_color')
                         stroke = '#000000'
                         if sc and isinstance(sc, (tuple, list)):
                             stroke = '#{:02x}{:02x}{:02x}'.format(*[int(c*255) for c in sc])
-                            brightness = sum([int(c*255) for c in sc]) / 3 / 255
-                        else:
-                            brightness = 0
-                        
-                        dash = line.get('dash')
-                        is_dashed = dash and dash[0] and len(dash[0]) > 1
-                        
                         width = x1 - x0
                         height = y1 - y0
-                        
-                        if brightness > 0.8:
-                            lw = 1
-                        elif brightness > 0.5:
-                            lw = max(1, raw_lw / 10)
-                        else:
-                            lw = min(max(1, raw_lw / 5), 3)
-                        
                         if height == 0 and width > 0:
-                            html_parts.append(f'<div class="line" style="left:{x0}pt;top:{y0}pt;width:{width}pt;height:{lw}pt;background:{stroke};"></div>')
+                            html_parts.append(f'<div class="line" style="left:{x0}pt;top:{y0}pt;width:{width}pt;height:1pt;background:{stroke};"></div>')
                         elif width == 0 and height > 0:
-                            html_parts.append(f'<div class="line" style="left:{x0}pt;top:{y0}pt;width:{lw}pt;height:{height}pt;background:{stroke};"></div>')
-                    except Exception as e:
-                        print(f'Line error p{page_num+1}: {e}')
+                            html_parts.append(f'<div class="line" style="left:{x0}pt;top:{y0}pt;width:1pt;height:{height}pt;background:{stroke};"></div>')
+                    except: pass
             
-            # Skip words extraction for scanned PDFs
             if not has_text:
                 html_parts.append('</div>')
                 continue
             
-            # Extract and render tables (disabled - causing rendering issues)
-            # try:
-            #     tables = page.debug_tablefinder().tables
-            #     for table in tables:
-            #         # Skip if table is not a Table object
-            #         if not hasattr(table, 'bbox'):
-            #             continue
-            #         
-            #         table_bbox = table.bbox  # (x0, top, x1, bottom)
-            #         if not isinstance(table_bbox, (tuple, list)) or len(table_bbox) != 4:
-            #             continue
-            #         
-            #         t_x0, t_top, t_x1, t_bottom = table_bbox
-            #         t_width = t_x1 - t_x0
-            #         t_height = t_bottom - t_top
-            #         
-            #         # Render table
-            #         html_parts.append(f'<table style="position:absolute;left:{t_x0}pt;top:{t_top}pt;width:{t_width}pt;height:{t_height}pt;border-collapse:collapse;">')
-            #         
-            #         # Render cells
-            #         if not hasattr(table, 'cells'):
-            #             html_parts.append('</table>')
-            #             continue
-            #         
-            #         cells = table.cells
-            #         for row in cells:
-            #             html_parts.append('<tr>')
-            #             for cell in row:
-            #                 if not cell or not hasattr(cell, 'bbox'):
-            #                     html_parts.append('<td></td>')
-            #                     continue
-            #                 
-            #                 cell_bbox = cell.bbox
-            #                 if not isinstance(cell_bbox, (tuple, list)) or len(cell_bbox) != 4:
-            #                     html_parts.append('<td></td>')
-            #                     continue
-            #                 
-            #                 c_x0, c_top, c_x1, c_bottom = cell_bbox
-            #                 c_width = c_x1 - c_x0
-            #                 c_height = c_bottom - c_top
-            #                 
-            #                 # Get cell text
-            #                 try:
-            #                     cell_text = page.crop(cell_bbox).extract_text()
-            #                     cell_text = cell_text.strip() if cell_text else ''
-            #                 except:
-            #                     cell_text = ''
-            #                 
-            #                 # Default styles
-            #                 border_style = '1pt solid #000000'
-            #                 bg_color = 'transparent'
-            #                 
-            #                 html_parts.append(f'<td style="width:{c_width}pt;height:{c_height}pt;border:{border_style};background:{bg_color};padding:0;">{cell_text}</td>')
-            #             html_parts.append('</tr>')
-            #         html_parts.append('</table>')
-            # except Exception as e:
-            #     print(f'Table error p{page_num+1}: {e}')
-            
-            # Extract and render characters - merge only consecutive chars with same style
+            # 优化版字符渲染：合并相邻相同样式字符，检测空格
             chars = page.chars
             if chars:
                 sorted_chars = sorted(chars, key=lambda x: (round(x.get('top', 0) * 2) / 2, x.get('x0', 0)))
@@ -395,7 +140,7 @@ def pdf_to_html(pdf_path, html_path):
                         hex_color = '#000000'
                     
                     merged_text = text
-                    merged_start_x = x0
+                    merged_x0 = x0
                     prev_x1 = x0 + width
                     
                     j = i + 1
@@ -417,14 +162,45 @@ def pdf_to_html(pdf_path, html_path):
                         same_line = abs(next_top - top) < 0.5
                         gap = next_x0 - prev_x1
                         
-                        if same_style and same_line and gap < size * 0.15:
-                            merged_text += next_text
-                            prev_x1 = next_x0 + next_width
-                            j += 1
+                        if same_style and same_line:
+                            # 两个阈值判断：
+                            # 1. gap < 0.3: 同一单词，合并
+                            # 2. 0.3 < gap < size*0.5: 不同单词，添加空格继续
+                            # 3. gap > size*0.5: 不同元素（如电话和邮箱），停止合并
+                            if gap < 0.3:
+                                merged_text += next_text
+                                prev_x1 = next_x0 + next_width
+                                j += 1
+                            elif gap < size * 0.5:
+                                merged_text += ' ' + next_text
+                                prev_x1 = next_x0 + next_width
+                                j += 1
+                            else:
+                                break
                         else:
                             break
                     
-                    style = f"left:{merged_start_x}pt;top:{top}pt;font-family:{font};font-size:{size}pt;color:{hex_color};"
+                    # 计算整段width：最后一个字符的结束位置 - 第一个字符的开始位置
+                    last_char = sorted_chars[j-1] if j > i else c
+                    merged_width = last_char.get('x0', 0) + last_char.get('width', 0) - merged_x0
+                    
+                    # 计算需要的字距：基于原始字符的平均宽度
+                    char_count = len(merged_text.replace(' ', ''))
+                    if char_count > 1:
+                        # 从PDF字符计算平均字符宽度
+                        total_char_width = sum(sorted_chars[k].get('width', size*0.6) for k in range(i, j))
+                        avg_char_width = total_char_width / (j - i)
+                        # 文本自然宽度（不含空格）+ 空格数 * 空格宽
+                        space_count = merged_text.count(' ')
+                        natural_width = avg_char_width * char_count + space_count * (size * 0.25)
+                        # 需要的字距调整 = (目标宽度 - 自然宽度) / 字符数
+                        letter_spacing = (merged_width - natural_width) / char_count if char_count > 0 else 0
+                        letter_spacing = max(-0.5, min(letter_spacing, 2))  # 限制范围
+                        spacing_css = f"letter-spacing:{letter_spacing}pt;"
+                    else:
+                        spacing_css = ""
+                    
+                    style = f"left:{merged_x0}pt;top:{top}pt;width:{merged_width}pt;font-family:{font};font-size:{size}pt;color:{hex_color};{spacing_css}"
                     html_parts.append(f'<span style="{style}">{merged_text}</span>')
                     
                     i = j
@@ -436,313 +212,33 @@ def pdf_to_html(pdf_path, html_path):
     with open(html_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(html_parts))
 
-def pdf_to_images(pdf_path, out_dir, resolution=150):
-    os.makedirs(out_dir, exist_ok=True)
-    with pdfplumber.open(pdf_path) as pdf:
-        for i, page in enumerate(pdf.pages):
-            img = page.to_image(resolution=resolution)
-            path = os.path.join(out_dir, f'pdf_page_{i+1}.png')
-            img.save(path, 'PNG')
-            print(f'Saved PDF image: {path}')
-
-def html_to_images(html_path, pdf_path, out_dir):
-    """Convert HTML pages to images using Playwright"""
-    if not PLAYWRIGHT_AVAILABLE:
-        print('Error: Playwright is not installed.')
-        print('To use HTML screenshot feature, install Playwright:')
-        print('  pip install playwright')
-        print('  playwright install chromium')
-        return
-
-    os.makedirs(out_dir, exist_ok=True)
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(f'file://{os.path.abspath(html_path)}')
-        page.wait_for_load_state('networkidle')
-
-        pdf_pages = page.locator('.pdf-page')
-        count = pdf_pages.count()
-
-        for i in range(count):
-            pdf_page_elem = pdf_pages.nth(i)
-            bbox = pdf_page_elem.bounding_box()
-
-            if bbox:
-                width_px = int(bbox['width'])
-                height_px = int(bbox['height'])
-
-                page.set_viewport_size({'width': width_px + 100, 'height': height_px + 100})
-
-                path = os.path.join(out_dir, f'html_page_{i+1}.png')
-                pdf_page_elem.screenshot(path=path)
-                print(f'Saved HTML image: {path}')
-
-        browser.close()
-
-
-def html_to_docx(html_path, docx_path):
-    """Convert HTML to DOCX format"""
-    if not DOCX_AVAILABLE:
-        print('Error: python-docx is not installed.')
-        print('To create DOCX files, install python-docx:')
-        print('  pip install python-docx')
-        return False
-
-    try:
-        with open(html_path, 'r', encoding='utf-8') as f:
-            html_content = f.read()
-    except Exception as e:
-        print(f'Error reading HTML file: {e}')
-        return False
-
-    soup = BeautifulSoup(html_content, 'lxml')
-
-    # Get page dimensions from style
-    page_width = 595  # default A4 width in points
-    page_height = 842  # default A4 height in points
-    style = soup.find('style')
-    if style:
-        css = style.string or ''
-        width_match = re.search(r'width:\s*(\d+)pt', css)
-        height_match = re.search(r'height:\s*(\d+)pt', css)
-        if width_match:
-            page_width = int(width_match.group(1))
-        if height_match:
-            page_height = int(height_match.group(1))
-
-    # Create DOCX document
-    doc = Document()
-    section = doc.sections[0]
-    section.page_width = Inches(page_width / 72)
-    section.page_height = Inches(page_height / 72)
-
-    # Get all elements
-    body = soup.find('body')
-    if not body:
-        print('Error: No body found in HTML')
-        return False
-
-    # Process each element in order (by top position)
-    elements = []
-    for elem in body.find_all(['div', 'p', 'img', 'table', 'hr']):
-        style = elem.get('style', '')
-        top_match = re.search(r'top:\s*([\d.]+)pt', style)
-        left_match = re.search(r'left:\s*([\d.]+)pt', style)
-        width_match = re.search(r'width:\s*([\d.]+)pt', style)
-        height_match = re.search(r'height:\s*([\d.]+)pt', style)
-
-        elem_data = {
-            'element': elem,
-            'top': float(top_match.group(1)) if top_match else 0,
-            'left': float(left_match.group(1)) if left_match else 0,
-            'width': float(width_match.group(1)) if width_match else page_width,
-            'height': float(height_match.group(1)) if height_match else 0,
-            'type': elem.name
-        }
-        elements.append(elem_data)
-
-    # Sort by top position
-    elements.sort(key=lambda x: x['top'])
-
-    # Process each element
-    for elem_data in elements:
-        elem = elem_data['element']
-        elem_type = elem_data['type']
-
-        if elem_type == 'img':
-            # Handle images
-            src = elem.get('src', '')
-            if src.startswith('data:image'):
-                # Extract base64 image
-                match = re.search(r'data:image/(\w+);base64,(.+)', src)
-                if match:
-                    img_data = base64.b64decode(match.group(2))
-                    try:
-                        img = Image.open(io.BytesIO(img_data))
-                        # Save to temporary file for docx
-                        temp_img_path = os.path.join(os.path.dirname(docx_path), 'temp_img.png')
-                        img.save(temp_img_path)
-
-                        # Calculate image size in inches
-                        width_inch = elem_data['width'] / 72
-                        height_inch = elem_data['height'] / 72
-
-                        # Add to docx (max width 6 inches)
-                        max_width = 6
-                        if width_inch > max_width:
-                            ratio = max_width / width_inch
-                            width_inch = max_width
-                            height_inch = height_inch * ratio
-
-                        doc.add_picture(temp_img_path, width=Inches(width_inch), height=Inches(height_inch))
-
-                        # Clean up temp file
-                        try:
-                            os.remove(temp_img_path)
-                        except:
-                            pass
-                    except Exception as e:
-                        print(f'Warning: Could not add image: {e}')
-
-        elif elem_type == 'table':
-            # Handle tables
-            rows = elem.find_all('tr')
-            if rows:
-                table = doc.add_table(rows=len(rows), cols=len(rows[0].find_all(['td', 'th'])) if rows else 0)
-                table.style = 'Table Grid'
-
-                for r_idx, row in enumerate(rows):
-                    cells = row.find_all(['td', 'th'])
-                    for c_idx, cell in enumerate(cells):
-                        if r_idx < len(table.rows) and c_idx < len(table.columns):
-                            cell_text = cell.get_text(strip=True)
-                            table.cell(r_idx, c_idx).text = cell_text
-
-        elif elem_type == 'hr':
-            # Horizontal line
-            doc.add_paragraph('_' * 50)
-
-        elif elem_type in ('div', 'p'):
-            # Handle text content
-            text = elem.get_text(strip=True)
-            if text:
-                # Check if it's a rectangle (border box with minimal text)
-                style = elem.get('style', '')
-                if 'border' in style or 'border-width' in style:
-                    # This might be a rectangle, add as bordered paragraph
-                    p = doc.add_paragraph(text)
-                else:
-                    # Regular paragraph
-                    p = doc.add_paragraph()
-
-                    # Parse inline styles
-                    for span in elem.find_all('span'):
-                        span_text = span.get_text()
-                        if not span_text:
-                            continue
-
-                        # Get style
-                        span_style = span.get('style', '')
-
-                        # Font size
-                        font_size = 12
-                        size_match = re.search(r'font-size:\s*([\d.]+)pt', span_style)
-                        if size_match:
-                            font_size = float(size_match.group(1))
-
-                        # Font color
-                        color = None
-                        color_match = re.search(r'color:\s*rgb\((\d+),\s*(\d+),\s*(\d+)\)', span_style)
-                        if color_match:
-                            color = RGBColor(
-                                int(color_match.group(1)),
-                                int(color_match.group(2)),
-                                int(color_match.group(3))
-                            )
-
-                        # Font name
-                        font_name = 'Calibri'
-                        font_match = re.search(r'font-family:\s*([^;]+)', span_style)
-                        if font_match:
-                            font_name = parse_fontname(font_match.group(1).strip())
-
-                        # Bold, Italic, Underline
-                        is_bold = 'font-weight: bold' in span_style or 'font-weight: 700' in span_style
-                        is_italic = 'font-style: italic' in span_style
-                        is_underline = 'text-decoration: underline' in span_style
-
-                        # Add run
-                        run = p.add_run(span_text)
-                        run.font.name = font_name
-                        run.font.size = Pt(font_size)
-                        if color:
-                            run.font.color.rgb = color
-                        if is_bold:
-                            run.font.bold = True
-                        if is_italic:
-                            run.font.italic = True
-                        if is_underline:
-                            run.font.underline = WD_UNDERLINE.SINGLE
-
-                    # If no spans found, add plain text
-                    if not p.runs:
-                        run = p.add_run(text)
-                        run.font.name = 'Calibri'
-                        run.font.size = Pt(12)
-
-    try:
-        doc.save(docx_path)
-        print(f'Saved DOCX: {docx_path}')
-        return True
-    except Exception as e:
-        print(f'Error saving DOCX: {e}')
-        return False
-
-
-def main():
-    import argparse
-    parser = argparse.ArgumentParser(description='Convert PDF to HTML/DOCX/DOC')
-    parser.add_argument('pdf_path', help='Path to input PDF file')
-    parser.add_argument('-o', '--output', default='output.html', help='Output file path')
-    parser.add_argument('-f', '--format', default='html', choices=['html', 'docx', 'doc'], help='Output format')
-    parser.add_argument('--screenshot', nargs='+', default=[], choices=['pdf', 'html', 'all'], help='Generate screenshots: pdf, html, all')
-    args = parser.parse_args()
-
-    pdf_path = args.pdf_path
-    output_path = args.output
-    output_format = args.format
-
-    if not os.path.exists(pdf_path):
-        print(f'Error: PDF file not found: {pdf_path}')
-        return
-
-    # Determine output path with correct extension
-    if output_format == 'html' and not output_path.endswith('.html'):
-        output_path = output_path.replace('.docx', '').replace('.doc', '') + '.html'
-    elif output_format == 'docx' and not output_path.endswith('.docx'):
-        output_path = output_path.replace('.html', '').replace('.doc', '') + '.docx'
-    elif output_format == 'doc' and not output_path.endswith('.doc'):
-        output_path = output_path.replace('.html', '').replace('.docx', '') + '.doc'
-
-    print(f'Converting PDF to {output_format.upper()}: {pdf_path}')
-
-    # Generate HTML first (intermediate format)
-    if output_path.endswith('.html'):
-        html_path = output_path
-    else:
-        html_path = output_path + '.html'
-    pdf_to_html(pdf_path, html_path)
-
-    # If output format is docx, convert HTML to DOCX
-    if output_format == 'docx':
-        success = html_to_docx(html_path, output_path)
-        if not success:
-            print('Failed to create DOCX, HTML file is available instead.')
-            return
-
-        # Clean up intermediate HTML file
-        if html_path != output_path:
-            try:
-                os.remove(html_path)
-            except:
-                pass
-
-    screenshot_opts = args.screenshot
-    if 'pdf' in screenshot_opts or 'all' in screenshot_opts:
-        print('Converting PDF pages to images...')
-        pdf_to_images(pdf_path, 'pdf_images')
-
-    if 'html' in screenshot_opts or 'all' in screenshot_opts:
-        print('Converting HTML to images...')
-        html_to_images(html_path, pdf_path, 'html_images')
-
-    print(f'Done! Output: {output_path}')
-    if 'pdf' in screenshot_opts or 'all' in screenshot_opts:
-        print('Check pdf_images/ folder for PDF screenshots.')
-    if 'html' in screenshot_opts or 'all' in screenshot_opts:
-        print('Check html_images/ folder for HTML screenshots.')
+def render_page_as_image(pdf_path, page_num, dpi=150):
+    doc = fitz.open(pdf_path)
+    page = doc[page_num]
+    mat = fitz.Matrix(dpi/72, dpi/72)
+    pix = page.get_pixmap(matrix=mat)
+    img_data = pix.tobytes("png")
+    doc.close()
+    return base64.b64encode(img_data).decode('utf-8'), pix.width, pix.height
 
 if __name__ == '__main__':
-    main()
+    import sys
+    if len(sys.argv) < 3:
+        print("用法: python optimize_convert.py <input.pdf> <output.html>")
+        print("示例: python optimize_convert.py resume-doc.pdf output.html")
+        sys.exit(1)
+    
+    pdf_path = sys.argv[1]
+    output_path = sys.argv[2]
+    
+    if not os.path.exists(pdf_path):
+        print(f"错误: 找不到文件 '{pdf_path}'")
+        print(f"当前目录: {os.getcwd()}")
+        print(f"目录中的文件:")
+        for f in os.listdir('.'):
+            if f.endswith('.pdf'):
+                print(f"  - {f}")
+        sys.exit(1)
+    
+    pdf_to_html_optimized(pdf_path, output_path)
+    print(f"优化版已生成: {output_path}")
