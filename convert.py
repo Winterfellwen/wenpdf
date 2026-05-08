@@ -31,7 +31,6 @@ def parse_fontname(fontname):
     else:
         name = fontname
     
-    # Map common PDF font names to standard web fonts
     font_map = {
         'ArialMT': 'Arial, sans-serif',
         'Arial-BoldMT': 'Arial, sans-serif',
@@ -40,6 +39,72 @@ def parse_fontname(fontname):
         'CourierNewPSMT': 'Courier New, monospace',
     }
     return font_map.get(name, f'{name}, sans-serif')
+
+def render_line(chars, html_parts):
+    """Render a line of characters, aggressively grouping same-style chars"""
+    if not chars:
+        return
+    
+    chars.sort(key=lambda x: x.get('x0', 0))
+    
+    current_text = ''
+    current_x0 = None
+    current_top = None
+    current_size = None
+    current_font = None
+    current_color = None
+    
+    for c in chars:
+        text = c.get('text', '')
+        x0 = c.get('x0', 0)
+        top = c.get('top', 0)
+        width = c.get('width', 0)
+        size = c.get('size', 12)
+        font = parse_fontname(c.get('fontname', 'Arial'))
+        color = c.get('color', (0,0,0))
+        if isinstance(color, (tuple, list)):
+            hex_color = '#{:02x}{:02x}{:02x}'.format(*[int(col*255) for col in color])
+        else:
+            hex_color = '#000000'
+        
+        is_space = text.strip() == '' and width > 3
+        
+        if current_x0 is None:
+            current_text = text
+            current_x0 = x0
+            current_top = top
+            current_size = size
+            current_font = font
+            current_color = hex_color
+            continue
+        
+        same_style = (size == current_size and font == current_font and color == current_color)
+        
+        if is_space:
+            style = f"left:{current_x0}pt;top:{current_top}pt;font-family:{current_font};font-size:{current_size}pt;color:{current_color};"
+            html_parts.append(f'<span style="{style}">{current_text}</span>')
+            
+            space_style = f"left:{x0}pt;top:{top}pt;width:{width}pt;font-size:{size}pt;"
+            html_parts.append(f'<span style="{space_style}"> </span>')
+            
+            current_text = ''
+            current_x0 = None
+        elif same_style:
+            current_text += text
+        else:
+            style = f"left:{current_x0}pt;top:{current_top}pt;font-family:{current_font};font-size:{current_size}pt;color:{current_color};"
+            html_parts.append(f'<span style="{style}">{current_text}</span>')
+            
+            current_text = text
+            current_x0 = x0
+            current_top = top
+            current_size = size
+            current_font = font
+            current_color = hex_color
+    
+    if current_text:
+        style = f"left:{current_x0}pt;top:{current_top}pt;font-family:{current_font};font-size:{current_size}pt;color:{current_color};"
+        html_parts.append(f'<span style="{style}">{current_text}</span>')
 
 def extract_images_pymupdf(pdf_path):
     """Extract images from PDF using PyMuPDF, returns dict mapping (page_num, xref) to image data"""
@@ -309,36 +374,60 @@ def pdf_to_html(pdf_path, html_path):
             # except Exception as e:
             #     print(f'Table error p{page_num+1}: {e}')
             
-            # Extract and render each character individually to preserve all spaces
+            # Extract and render characters - merge only consecutive chars with same style
             chars = page.chars
             if chars:
-                prev = None
-                for c in chars:
-                    text = c['text']
-                    x0 = c['x0']
-                    top = c['top']
+                sorted_chars = sorted(chars, key=lambda x: (round(x.get('top', 0) * 2) / 2, x.get('x0', 0)))
+                
+                i = 0
+                while i < len(sorted_chars):
+                    c = sorted_chars[i]
+                    text = c.get('text', '')
+                    x0 = c.get('x0', 0)
+                    top = c.get('top', 0)
+                    width = c.get('width', 0)
                     size = c.get('size', 12)
-                    
-                    # Add space if there's a significant gap between characters on same line
-                    if prev and abs(top - prev['top']) < 2:
-                        gap = x0 - prev['x1']
-                        if gap > size * 0.3:  # More than 30% of font size
-                            style = f"left:{prev['x1']}pt;top:{prev['top']}pt;width:{gap}pt;font-size:{size}pt;"
-                            html_parts.append(f'<span style="{style}"> </span>')
-                    
-                    # Render the character
-                    font = parse_fontname(c.get('fontname', 'Arial, sans-serif'))
+                    font = parse_fontname(c.get('fontname', 'Arial'))
                     color = c.get('color', (0,0,0))
-                    
                     if isinstance(color, (tuple, list)):
-                        hex_color = '#{:02x}{:02x}{:02x}'.format(*[int(c*255) for c in color])
+                        hex_color = '#{:02x}{:02x}{:02x}'.format(*[int(col*255) for col in color])
                     else:
                         hex_color = '#000000'
                     
-                    style = f"left:{x0}pt;top:{top}pt;font-family:{font};font-size:{size}pt;color:{hex_color};"
-                    html_parts.append(f'<span style="{style}">{text}</span>')
+                    merged_text = text
+                    merged_start_x = x0
+                    prev_x1 = x0 + width
                     
-                    prev = c
+                    j = i + 1
+                    while j < len(sorted_chars):
+                        next_c = sorted_chars[j]
+                        next_text = next_c.get('text', '')
+                        next_x0 = next_c.get('x0', 0)
+                        next_top = next_c.get('top', 0)
+                        next_width = next_c.get('width', 0)
+                        next_size = next_c.get('size', 12)
+                        next_font = parse_fontname(next_c.get('fontname', 'Arial'))
+                        next_color = next_c.get('color', (0,0,0))
+                        if isinstance(next_color, (tuple, list)):
+                            next_hex = '#{:02x}{:02x}{:02x}'.format(*[int(col*255) for col in next_color])
+                        else:
+                            next_hex = '#000000'
+                        
+                        same_style = (next_size == size and next_font == font and next_hex == hex_color)
+                        same_line = abs(next_top - top) < 0.5
+                        gap = next_x0 - prev_x1
+                        
+                        if same_style and same_line and gap < size * 0.15:
+                            merged_text += next_text
+                            prev_x1 = next_x0 + next_width
+                            j += 1
+                        else:
+                            break
+                    
+                    style = f"left:{merged_start_x}pt;top:{top}pt;font-family:{font};font-size:{size}pt;color:{hex_color};"
+                    html_parts.append(f'<span style="{style}">{merged_text}</span>')
+                    
+                    i = j
             
             html_parts.append('</div>')
     
@@ -620,7 +709,10 @@ def main():
     print(f'Converting PDF to {output_format.upper()}: {pdf_path}')
 
     # Generate HTML first (intermediate format)
-    html_path = output_path.replace('.docx', '.doc').replace('.doc', '') + '.html'
+    if output_path.endswith('.html'):
+        html_path = output_path
+    else:
+        html_path = output_path + '.html'
     pdf_to_html(pdf_path, html_path)
 
     # If output format is docx, convert HTML to DOCX
