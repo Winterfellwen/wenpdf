@@ -21,7 +21,7 @@ def parse_fontname(fontname):
     }
     return font_map.get(name, f'{name}, sans-serif')
 
-def pdf_to_html_optimized(pdf_path, html_path):
+def pdf_to_html_optimized(pdf_path, html_path, screenshot_mode=None):
     """优化版HTML转换 - 保持位置精确同时减少span数量"""
     html_parts = [
         '<!DOCTYPE html>',
@@ -49,6 +49,8 @@ def pdf_to_html_optimized(pdf_path, html_path):
             if not has_text:
                 img_b64, img_w, img_h = render_page_as_image(pdf_path, page_num, dpi=150)
                 html_parts.append(f'<img src="data:image/png;base64,{img_b64}" style="left:0;top:0;width:{page_width}pt;height:{page_height}pt;" />')
+                html_parts.append('</div>')
+                continue
             else:
                 # 提取图片
                 try:
@@ -114,10 +116,6 @@ def pdf_to_html_optimized(pdf_path, html_path):
                         elif width == 0 and height > 0:
                             html_parts.append(f'<div class="line" style="left:{x0}pt;top:{y0}pt;width:1pt;height:{height}pt;background:{stroke};"></div>')
                     except: pass
-            
-            if not has_text:
-                html_parts.append('</div>')
-                continue
             
             # 优化版字符渲染：合并相邻相同样式字符，检测空格
             chars = page.chars
@@ -212,6 +210,16 @@ def pdf_to_html_optimized(pdf_path, html_path):
     with open(html_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(html_parts))
 
+def render_page_as_image_to_file(pdf_path, output_dir, page_num, dpi=150):
+    doc = fitz.open(pdf_path)
+    page = doc[page_num]
+    mat = fitz.Matrix(dpi/72, dpi/72)
+    pix = page.get_pixmap(matrix=mat)
+    img_path = os.path.join(output_dir, f'pdf_page_{page_num}.png')
+    pix.save(img_path)
+    doc.close()
+    return img_path, pix.width, pix.height
+
 def render_page_as_image(pdf_path, page_num, dpi=150):
     doc = fitz.open(pdf_path)
     page = doc[page_num]
@@ -222,14 +230,33 @@ def render_page_as_image(pdf_path, page_num, dpi=150):
     return base64.b64encode(img_data).decode('utf-8'), pix.width, pix.height
 
 if __name__ == '__main__':
+    import argparse
     import sys
-    if len(sys.argv) < 3:
-        print("用法: python optimize_convert.py <input.pdf> <output.html>")
-        print("示例: python optimize_convert.py resume-doc.pdf output.html")
+    
+    parser = argparse.ArgumentParser(description='PDF to HTML converter')
+    input_group = parser.add_mutually_exclusive_group()
+    input_group.add_argument('pdf_input', nargs='?', help='Input PDF file')
+    input_group.add_argument('-i', '--input', dest='pdf_input_alt', help='Input PDF file')
+    parser.add_argument('-o', '--output', dest='output', required=False, default=None, help='Output HTML file')
+    parser.add_argument('-s', '--screenshot', dest='screenshot', default=None, 
+                        choices=['all', 'pdf', 'html'], help='Screenshot mode: all=PDF+HTML, pdf=only PDF, html=only HTML')
+    args = parser.parse_args()
+    
+    pdf_path = args.pdf_input if args.pdf_input else args.pdf_input_alt
+    output_path = args.output
+    screenshot_mode = args.screenshot
+    
+    if screenshot_mode == 'pdf' and not output_path:
+        base_name = os.path.splitext(os.path.basename(pdf_path))[0]
+        output_path = base_name + '.html'
+        print(f"警告: 未指定输出文件，使用默认: {output_path}")
+    elif not output_path:
+        print("错误: 必须指定输出文件")
         sys.exit(1)
     
-    pdf_path = sys.argv[1]
-    output_path = sys.argv[2]
+    print(f"DEBUG: pdf_path={pdf_path}")
+    print(f"DEBUG: output_path={output_path}")
+    print(f"DEBUG: screenshot_mode={screenshot_mode}")
     
     if not os.path.exists(pdf_path):
         print(f"错误: 找不到文件 '{pdf_path}'")
@@ -240,5 +267,65 @@ if __name__ == '__main__':
                 print(f"  - {f}")
         sys.exit(1)
     
-    pdf_to_html_optimized(pdf_path, output_path)
-    print(f"优化版已生成: {output_path}")
+    output_dir = os.path.dirname(output_path) or '.'
+    output_base = os.path.splitext(os.path.basename(output_path))[0]
+    screenshot_dir = os.path.join(output_dir, output_base + '_screenshots')
+    
+    with pdfplumber.open(pdf_path) as pdf:
+        total_pages = len(pdf.pages)
+    
+    if screenshot_mode == 'pdf':
+        os.makedirs(screenshot_dir, exist_ok=True)
+        for page_num in range(total_pages):
+            img_path, w, h = render_page_as_image_to_file(pdf_path, screenshot_dir, page_num)
+            print(f"截图已生成: {img_path}")
+        print(f"截图目录: {screenshot_dir}")
+        print(f"完成（仅PDF截图，未转换）")
+        sys.exit(0)
+    
+    if screenshot_mode in ('html', 'all'):
+        pdf_to_html_optimized(pdf_path, output_path, None)
+        print(f"HTML已生成: {output_path}")
+        
+        try:
+            from playwright.sync_api import sync_playwright
+            
+            os.makedirs(screenshot_dir, exist_ok=True)
+            
+            with pdfplumber.open(pdf_path) as pdf:
+                page_sizes = [(page.width, page.height) for page in pdf.pages]
+            
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                
+                html_path_abs = os.path.abspath(output_path)
+                html_url = f'file:///{html_path_abs.replace("\\", "/")}'
+                
+                for page_num, (page_width, page_height) in enumerate(page_sizes):
+                    page = browser.new_page(viewport={'width': int(page_width), 'height': int(page_height)})
+                    page.goto(html_url)
+                    page.wait_for_load_state('networkidle')
+                    
+                    pdf_page = page.locator(f'.pdf-page').nth(page_num)
+                    pdf_page.screenshot(path=os.path.join(screenshot_dir, f'html_page_{page_num}.png'))
+                    print(f"HTML截图已生成: {os.path.join(screenshot_dir, f'html_page_{page_num}.png')}")
+                    
+                    page.close()
+                
+                browser.close()
+        except ImportError:
+            print("警告: 未安装 playwright，跳过HTML截图")
+            print("请运行: pip install playwright")
+            print("同时运行: playwright install chromium")
+        except Exception as e:
+            print(f"HTML截图失败: {e}")
+    
+    if screenshot_mode in ('pdf', 'all'):
+        os.makedirs(screenshot_dir, exist_ok=True)
+        for page_num in range(total_pages):
+            img_path, w, h = render_page_as_image_to_file(pdf_path, screenshot_dir, page_num)
+            print(f"PDF截图已生成: {img_path}")
+        print(f"截图目录: {screenshot_dir}")
+    
+    if screenshot_mode not in ('pdf',):
+        print(f"优化版已生成: {output_path}")
